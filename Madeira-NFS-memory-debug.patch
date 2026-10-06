@@ -1,0 +1,146 @@
+--- a/Madeira-main/build/ntdll-unix/virtual_ios.c
++++ b/Madeira-main/build/ntdll-unix/virtual_ios.c
+@@ -19875,6 +19875,36 @@
+     else if (rw && a >= rw && a < rw + sz) region = "JIT-POOL-RW (alias)";
+     dprintf( 2, "[fault-rgn] addr=%p page=%p vprot prev/this/next=%02x/%02x/%02x region=%s\n",
+              addr, page, vp_prev, vp, vp_next, region );
++    {
++        UINT64 guest = 0;
++        if (ios_diag_host_guest( a, &guest ))
++        {
++            mach_vm_address_t ma = (mach_vm_address_t)(uintptr_t)page;
++            mach_vm_size_t ms = 0;
++            vm_region_basic_info_data_64_t mi;
++            mach_msg_type_number_t mc = VM_REGION_BASIC_INFO_COUNT_64;
++            mach_port_t mo = MACH_PORT_NULL;
++            kern_return_t mk = mach_vm_region( mach_task_self(), &ma, &ms,
++                                               VM_REGION_BASIC_INFO_64,
++                                               (vm_region_info_t)&mi, &mc, &mo );
++            dprintf( 2, "[guestmem] FAULT host=0x%llx page=0x%llx guest=0x%08llx "
++                       "guest_page=0x%08llx%s\n",
++                     (unsigned long long)a, (unsigned long long)(uintptr_t)page,
++                     (unsigned long long)guest,
++                     (unsigned long long)(guest & ~0xfffULL),
++                     guest == IOS_DIAG_GUEST_TARGET ? "  <== EXACT-TARGET" :
++                     (guest >= IOS_DIAG_GUEST_BEGIN && guest < IOS_DIAG_GUEST_END)
++                         ? "  <== TARGET-BAND" : "" );
++            if (mk == KERN_SUCCESS)
++                dprintf( 2, "[guestmem] MACH-REGION base=0x%llx size=0x%llx "
++                           "prot=0x%x max=0x%x inherit=%d behavior=%d\n",
++                         (unsigned long long)ma, (unsigned long long)ms,
++                         (unsigned)mi.protection, (unsigned)mi.max_protection,
++                         mi.inheritance, mi.behavior );
++            else
++                dprintf( 2, "[guestmem] MACH-REGION lookup FAILED kr=%d\n", (int)mk );
++        }
++    }
+     if (view)
+         dprintf( 2, "[fault-rgn]   IN WINE VIEW base=%p size=0x%lx protect=0x%x off=0x%lx end=%p\n",
+                  view->base, (unsigned long)view->size, view->protect,
+@@ -20823,6 +20853,36 @@
+ static UINT64 ios_vm_watch_addr;
+ static int ios_vm_watch_ready;
+ 
++/* mlDIAG-GUEST: targeted guest-memory provenance probe for the NFS MW crash.
++ *
++ * The failing host address 0x71B449AB6A corresponds to guest address
++ * 0xB449AB6A when the WoW64 window is based at 0x7100000000.
++ * Keep this probe deliberately narrow so it does not recreate the historical
++ * multi-million-line VM log storms.
++ */
++#define IOS_DIAG_WOW_HOST_BASE   0x7100000000ULL
++#define IOS_DIAG_WOW_HOST_END    0x7200000000ULL
++#define IOS_DIAG_GUEST_BEGIN     0xB0000000ULL
++#define IOS_DIAG_GUEST_END       0xB8000000ULL
++#define IOS_DIAG_GUEST_TARGET    0xB449AB6AULL
++
++static int ios_diag_host_guest( UINT64 host, UINT64 *guest )
++{
++    if (host < IOS_DIAG_WOW_HOST_BASE || host >= IOS_DIAG_WOW_HOST_END) return 0;
++    if (guest) *guest = host - IOS_DIAG_WOW_HOST_BASE;
++    return 1;
++}
++
++static int ios_diag_guest_overlap( UINT64 host, SIZE_T size, UINT64 *guest )
++{
++    UINT64 g, end;
++    if (!ios_diag_host_guest( host, &g )) return 0;
++    end = g + (UINT64)size;
++    if (end < g) end = UINT64_MAX;
++    if (guest) *guest = g;
++    return g < IOS_DIAG_GUEST_END && end > IOS_DIAG_GUEST_BEGIN;
++}
++
+ static UINT64 ios_vm_watch(void)
+ {
+     if (!ios_vm_watch_ready)
+@@ -20875,15 +20935,28 @@
+             dprintf( 2, "[valloc] limited/violating allocations: first 200 logged, the rest are not "
+                         "(MADEIRA_VALLOC_LOG_ALL=1 logs all)\n" );
+         ios_vm_alloc_logged++;
+-        dprintf( 2, "[valloc] ml959 %s base=0x%llx size=0x%llx type=0x%x prot=0x%x tid=%04x"
+-                 " | req_hint=0x%llx zero_bits=0x%llx limit=0x%llx%s\n",
+-                 covers ? "COVERS-WATCH" : (viol ? "LIMIT-VIOLATED" : "#"),
+-                 (unsigned long long)b,
+-                 (unsigned long long)size, (unsigned)type, (unsigned)protect,
+-                 NtCurrentTeb() ? (unsigned)(ULONG_PTR)NtCurrentTeb()->ClientId.UniqueThread : 0,
+-                 (unsigned long long)hint, (unsigned long long)zbits,
+-                 (unsigned long long)lim,
+-                 viol ? "  <== RESULT EXCEEDS THE REQUESTED LIMIT" : "" );
++        {
++            UINT64 guest = 0;
++            int in_guest = ios_diag_host_guest( b, &guest );
++            dprintf( 2, "[valloc] ml959 %s base=0x%llx size=0x%llx type=0x%x prot=0x%x tid=%04x"
++                     " | req_hint=0x%llx zero_bits=0x%llx limit=0x%llx%s%s\n",
++                     covers ? "COVERS-WATCH" : (viol ? "LIMIT-VIOLATED" : "#"),
++                     (unsigned long long)b,
++                     (unsigned long long)size, (unsigned)type, (unsigned)protect,
++                     NtCurrentTeb() ? (unsigned)(ULONG_PTR)NtCurrentTeb()->ClientId.UniqueThread : 0,
++                     (unsigned long long)hint, (unsigned long long)zbits,
++                     (unsigned long long)lim,
++                     viol ? "  <== RESULT EXCEEDS THE REQUESTED LIMIT" : "",
++                     in_guest ? "  <== WOW64-GUEST-WINDOW" : "" );
++            if (in_guest && guest < IOS_DIAG_GUEST_END &&
++                guest + (UINT64)size > IOS_DIAG_GUEST_BEGIN)
++                dprintf( 2, "[guestmem] ALLOC host=0x%llx guest=0x%08llx size=0x%llx "
++                           "type=0x%x prot=0x%x%s\n",
++                         (unsigned long long)b, (unsigned long long)guest,
++                         (unsigned long long)size, (unsigned)type, (unsigned)protect,
++                         (guest <= IOS_DIAG_GUEST_TARGET &&
++                          guest + (UINT64)size > IOS_DIAG_GUEST_TARGET) ? "  <== COVERS-TARGET" : "" );
++        }
+     }
+ }
+ 
+@@ -20899,6 +20972,15 @@
+                  hits ? "HITS-WATCH" : "#", (unsigned long long)b,
+                  (unsigned long long)size, (unsigned)type,
+                  NtCurrentTeb() ? (unsigned)(ULONG_PTR)NtCurrentTeb()->ClientId.UniqueThread : 0 );
++        {
++            UINT64 guest = 0;
++            if (ios_diag_guest_overlap( b, size, &guest ))
++                dprintf( 2, "[guestmem] FREE host=0x%llx guest=0x%08llx size=0x%llx type=0x%x%s\n",
++                         (unsigned long long)b, (unsigned long long)guest,
++                         (unsigned long long)size, (unsigned)type,
++                         (guest <= IOS_DIAG_GUEST_TARGET &&
++                          guest + (UINT64)size > IOS_DIAG_GUEST_TARGET) ? "  <== TOUCHES-TARGET" : "" );
++        }
+     }
+ }
+ #endif
+@@ -23999,6 +24081,15 @@
+         *size_ptr = 0;
+         return STATUS_SUCCESS;
+     }
++    {
++        UINT64 guest = 0;
++        if (ios_diag_guest_overlap( (UINT64)(ULONG_PTR)addr, size, &guest ))
++            dprintf( 2, "[guestmem] PROTECT host=0x%llx guest=0x%08llx size=0x%llx new_prot=0x%x%s\n",
++                     (unsigned long long)(ULONG_PTR)addr, (unsigned long long)guest,
++                     (unsigned long long)size, (unsigned)new_prot,
++                     (guest <= IOS_DIAG_GUEST_TARGET &&
++                      guest + (UINT64)size > IOS_DIAG_GUEST_TARGET) ? "  <== COVERS-TARGET" : "" );
++    }
+     LPVOID ios_jit_orig_addr = NULL;  /* JIT pool RX addr if caller passed one */
+     {
+         LPVOID orig_addr = addr;
