@@ -1,0 +1,134 @@
+name: Build IPA - NFS Memory Debug
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  llvm:
+    runs-on: macos-26
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build LLVM
+        run: |
+          scripts/build-llvm.sh
+
+      - name: Upload LLVM
+        uses: actions/upload-artifact@v4
+        with:
+          name: llvm
+          path: build/llvm
+
+  fex:
+    needs: llvm
+    runs-on: macos-26
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Download LLVM
+        uses: actions/download-artifact@v4
+        with:
+          name: llvm
+          path: build/llvm
+
+      - name: Build FEX
+        run: |
+          scripts/build-fex.sh
+
+      - name: Upload FEX
+        uses: actions/upload-artifact@v4
+        with:
+          name: fex
+          path: build/fex
+
+  i386:
+    needs: llvm
+    runs-on: macos-26
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Download LLVM
+        uses: actions/download-artifact@v4
+        with:
+          name: llvm
+          path: build/llvm
+
+      - name: Build i386
+        run: |
+          scripts/build-i386.sh
+
+      - name: Upload i386
+        uses: actions/upload-artifact@v4
+        with:
+          name: i386
+          path: build/i386
+
+  app:
+    needs:
+      - llvm
+      - fex
+      - i386
+
+    runs-on: macos-26
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # Apply the targeted NFS memory diagnostics.
+      - name: Apply NFS memory diagnostics
+        run: |
+          git apply --check Madeira-NFS-memory-debug.patch
+          git apply Madeira-NFS-memory-debug.patch
+
+      - name: Download LLVM
+        uses: actions/download-artifact@v4
+        with:
+          name: llvm
+          path: build/llvm
+
+      - name: Download FEX
+        uses: actions/download-artifact@v4
+        with:
+          name: fex
+          path: build/fex
+
+      - name: Download i386
+        uses: actions/download-artifact@v4
+        with:
+          name: i386
+          path: build/i386
+
+      - name: Build IPA
+        run: |
+          scripts/build-ipa.sh
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: Madeira-ipa-nfs-memory-debug
+          path: dist/Madeira.ipa
